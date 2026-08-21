@@ -1,17 +1,20 @@
-"""Step 2: measure how distinguishable synthetic 168-bar GAN windows are from
-real ones, reusing the EXACT SAME classifier + stylized-fact features as
-`reality_floor/`, so the AUC here is directly comparable to the real-vs-real
-floor measured there.
+"""Measure how distinguishable synthetic GAN windows (length gan.model.WINDOW_LEN)
+are from real ones, reusing the EXACT SAME classifier + stylized-fact
+features as `reality_floor/`, so the AUC here is directly comparable to the
+real-vs-real floor measured there.
 
-Real windows for this test are NON-OVERLAPPING 168-bar slices of the full
-history (reality_floor's requirement, for statistical independence between
-windows) -- deliberately different from the overlapping stride-8 windows
-`gan/train.py` trains on. Mixing those two would bias the AUC.
+Real windows for this test are NON-OVERLAPPING WINDOW_LEN-bar slices of the
+full history (reality_floor's requirement, for statistical independence
+between windows) -- deliberately different from the overlapping stride-8
+windows `gan/train.py` trains on. Mixing those two would bias the AUC.
 
-Because 168 bars wasn't one of the three window lengths reality_floor
-originally measured (42/84/180), this script also (re)computes the
-real-vs-real floor at L=168 using the identical `reality_floor.classify`
-code, so there's an apples-to-apples number to compare against.
+This script also (re)computes the real-vs-real floor at L=WINDOW_LEN using
+the identical `reality_floor.classify` code, so there's always an
+apples-to-apples number to compare against -- even when WINDOW_LEN isn't
+one of the three lengths reality_floor originally measured (as with 168,
+main branch) and even when it is (as with 42, this branch: recomputing
+here should reproduce reality_floor's own 42-bar numbers exactly, same
+data/function/seed, which is itself a useful cross-check).
 """
 
 from __future__ import annotations
@@ -40,7 +43,10 @@ from gan.train import GEN_BASE_CHANNELS, Z_DIM, pick_device
 # ----------------------------------- CONFIG -----------------------------------
 N_REPEATS = 20  # fresh synthetic batches / CV splits per checkpoint (same discipline as Step 0)
 BASE_SEED = 4242
-FLOOR_SEED = 42  # matches reality_floor/run.py's seed, for a like-for-like floor at L=168
+REALITY_FLOOR_BASE_SEED = 42  # reality_floor/run.py's BASE_SEED
+FLOOR_SEED = REALITY_FLOOR_BASE_SEED + WINDOW_LEN  # exactly reality_floor/run.py's seed=BASE_SEED+window_len,
+# so when WINDOW_LEN is one of reality_floor's own measured lengths (42/84/180) this reproduces its
+# floor number exactly -- a useful cross-check, not just "a floor at this length"
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "gan"
 CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"

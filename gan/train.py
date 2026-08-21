@@ -1,4 +1,4 @@
-"""WGAN-GP training script for 168-bar BTC OHLC windows.
+"""WGAN-GP training script for BTC OHLC windows of length gan.model.WINDOW_LEN.
 
 General-purpose training script, configurable via N_GEN_STEPS / RUN_TAG:
   - Step 1 (committed as `results/gan/step1_*`): a short 300-step run that
@@ -9,6 +9,10 @@ General-purpose training script, configurable via N_GEN_STEPS / RUN_TAG:
     step count -- we want to be able to pick the best checkpoint, not just
     the last) so `gan/measure_realism.py` can track how real-vs-synthetic
     AUC evolves over training.
+  - Step 2b (branch `windows-42bar`): identical config, WINDOW_LEN changed
+    from 168 (28d) to 42 (a true 7-day window) in gan/model.py -- everything
+    else, including this script, is unchanged, so the two runs are a fair
+    comparison of window length alone.
 
 Runs locally on Apple Silicon (device auto-picks MPS -> CUDA -> CPU) or on
 Colab GPU unchanged: upload/clone this repo and run `python gan/train.py`;
@@ -141,11 +145,12 @@ def main() -> None:
     feats = ohlc_to_features(df)
     normalizer = fit_normalizer(feats)
     z_feats = normalizer.standardize(feats)
-    windows = make_windows(z_feats, WINDOW_LEN, WINDOW_STRIDE)  # [n, 4, 168]
+    windows = make_windows(z_feats, WINDOW_LEN, WINDOW_STRIDE)  # [n, 4, WINDOW_LEN]
     anchors = window_anchor_prices(df, WINDOW_LEN, WINDOW_STRIDE)
+    window_days = WINDOW_LEN * 4 / 24  # 4h bars -> days
     print(
         f"Loaded {len(df)} bars -> {len(feats)} feature bars -> {len(windows)} training windows "
-        f"(window={WINDOW_LEN} bars = 28d, stride={WINDOW_STRIDE} bars)"
+        f"(window={WINDOW_LEN} bars = {window_days:g}d, stride={WINDOW_STRIDE} bars)"
     )
     verify_data_roundtrip(df, normalizer, windows, anchors)
 
@@ -226,6 +231,9 @@ def main() -> None:
         f"\nTraining ({N_GEN_STEPS} generator steps x {N_CRITIC} critic steps) took "
         f"{elapsed:.1f}s on {device} ({elapsed / N_GEN_STEPS * 1000:.1f} ms/gen-step avg)"
     )
+
+    if not throughput_log:  # N_GEN_STEPS < THROUGHPUT_CHUNK -- no full chunk completed
+        throughput_log.append(dict(chunk_end_step=N_GEN_STEPS, ms_per_gen_step=elapsed / N_GEN_STEPS * 1000))
 
     first_chunk_ms = throughput_log[0]["ms_per_gen_step"]
     last_chunk_ms = throughput_log[-1]["ms_per_gen_step"]
