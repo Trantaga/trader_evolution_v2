@@ -100,9 +100,10 @@ calls "7d"). The architecture was already built and trained around
 `WINDOW_LEN=168` before this was caught, so Step 2 keeps it and instead
 computes the reality floor *at L=168* directly (see Results below) for a
 correct apples-to-apples comparison, rather than misusing the 7d/42-bar
-floor number. Worth fixing (retrain at 42 bars for a true 7-day window) in
-a later step if 7 days specifically matters, e.g. for shaping training runs
-downstream.
+floor number. **Update**: Step 2b (branch `windows-42bar`) retrained at the
+true 7-day window (42 bars) and found it clearly outperforms 168-bar on
+gap-to-floor — see that section below. That branch is now the recommended
+line of work going forward.
 
 ### How to run
 
@@ -317,3 +318,119 @@ move the needle at all — the generator's tails and asymmetry are already
 roughly plausible; what's off is the trend structure. **Attack lag-1 return
 autocorrelation (and run-length) next** — that's the single biggest lever
 for the next tuning step.
+
+## Step 2b (branch `windows-42bar`): does the true 7-day window do better?
+
+Step 2's 168-bar window turned out to be 28 days, not 7 (see the window-
+length note above). `reality_floor/` found the true 7-day window (42 bars)
+gives the cleanest floor (most non-overlapping windows, tightest spread).
+This branch reruns Step 2 with **only** `WINDOW_LEN` changed, 168 → 42, to
+test whether that also makes for a better-trained generator — same
+architecture depth/channels, same z-dim/lr/n_critic/λ_gp/batch size, same
+20k steps, same checkpoint cadence, same overlapping-train /
+non-overlapping-validate window discipline.
+
+**Architecture change, precisely**: the conv stack in `gan/model.py` is now
+generic over `WINDOW_LEN` (see its docstring) — it always builds
+`START_LEN=21` and exactly 3 resampling blocks with the same channel
+schedule as before, applying stride-2 resampling to only as many blocks as
+needed to reach `WINDOW_LEN` and leaving the rest as stride-1 same-length
+refinement blocks. Depth (3 blocks) and channel widths are identical to
+Step 2's model; only the resampling factor differs. This is also a strict
+generalization: re-running with `WINDOW_LEN=168` reproduces Step 2's exact
+model (392,580 / 44,833 generator/critic params, verified bit-for-bit
+identical param counts). At `WINDOW_LEN=42`: **389,508 generator / 34,593
+critic params** — comparable width, slightly fewer critic params since 2 of
+its 3 blocks are now stride-1 kernel-3 convs instead of stride-2 kernel-4.
+
+**A real bug caught along the way**: `gan/measure_realism.py`'s floor
+computation used a hardcoded `FLOOR_SEED=42`, which does *not* match
+`reality_floor/run.py`'s actual seeding (`BASE_SEED=42 + window_len`). This
+didn't matter for Step 2 (168 bars has no Step-0 counterpart to check
+against), but at 42 bars it does: the mismatch produced 0.4960 instead of
+Step 0's 0.5117 the first time. Fixed to `FLOOR_SEED = 42 + WINDOW_LEN`,
+confirmed exact reproduction of Step 0's 42-bar floor. (Step 2's committed
+168-bar floor of 0.5106 was computed under the old, uncoordinated seed —
+still a statistically valid floor estimate, just not one there was ever a
+ground truth to check it against; not retroactively changed.)
+
+**Training**: 692.0s (11.5 min) on M1 MPS, 34.6 ms/gen-step avg — faster
+than 168-bar's 1174.0s, as expected from the smaller tensors. **No thermal
+throttling this run** (-3% first-to-last chunk, vs. +58% for 168-bar).
+All losses finite, all 10 checkpoints' generated windows pass every
+structural-validity check (512/512).
+
+**Realism measurement** (identical protocol to Step 2: same classifier,
+same features, 451 non-overlapping real 42-bar windows, 20 repeats/checkpoint):
+
+Reality floor at L=42 (recomputed here, exactly reproducing Step 0):
+**mean 0.5117, std 0.0448, min 0.4140, max 0.5892** — this run's target.
+
+| step | AUC mean | std | min | max |
+|-----:|---------:|----:|----:|----:|
+| 2,000  | 0.7640 | 0.0187 | 0.7311 | 0.7982 |
+| 4,000  | 0.6649 | 0.0164 | 0.6291 | 0.6914 |
+| 6,000  | 0.6344 | 0.0178 | 0.6008 | 0.6755 |
+| 8,000  | 0.5928 | 0.0250 | 0.5370 | 0.6268 |
+| 10,000 | 0.5892 | 0.0138 | 0.5608 | 0.6112 |
+| 12,000 | 0.6205 | 0.0292 | 0.5706 | 0.6861 |
+| 14,000 | 0.5870 | 0.0207 | 0.5314 | 0.6172 |
+| 16,000 | 0.5859 | 0.0304 | 0.5248 | 0.6512 |
+| 18,000 | 0.5826 | 0.0254 | 0.5224 | 0.6227 |
+| 20,000 (final) | 0.5615 | 0.0209 | 0.5305 | 0.6176 |
+
+Plot: `results/gan/step2_auc_over_training.png`. Full numbers:
+`results/gan/step2_realism_results.json`.
+
+**Top feature importances** (final checkpoint, same permutation-importance
+diagnostic as Step 2):
+
+| feature | importance (AUC drop) |
+|---|---:|
+| `acf_ret_1` (return autocorrelation, lag 1) | +0.0479 |
+| `acf_ret_3` | +0.0211 |
+| `skew` | +0.0195 |
+| `longest_down_run` | +0.0180 |
+| `q05` | +0.0168 |
+| `acf_absret_2` | +0.0167 |
+| `acf_absret_3` | +0.0162 |
+| `q99` | +0.0113 |
+
+### The comparison
+
+| window | final AUC | floor | **gap (AUC − floor)** |
+|---|---:|---:|---:|
+| 168-bar (28d, main) | 0.6106 | 0.5106 | **0.1000** |
+| 42-bar (7d, this branch) | 0.5615 | 0.5117 | **0.0498** |
+
+**42-bar's gap to its own floor is about half of 168-bar's** (0.050 vs.
+0.100) — clearly better, not just similar. It's also not simply "an easier
+floor to hit": the two floors are almost identical (0.511 vs. 0.512), so
+this is a real difference in how well the generator matches reality at each
+scale, not an artifact of a looser target.
+
+**Convergence read**: noisier and less monotonic than 168-bar's curve (a
+bump at step 12,000 back up to 0.62 after dipping to 0.589 at 10,000), but
+the overall trend is still downward through 20,000 steps, and the **final
+checkpoint is the best one measured** — no sign of a plateau, so more
+training steps likely keep helping here too, same read as Step 2.
+
+**Same biggest tell, both window lengths**: `acf_ret_1` (lag-1 return
+autocorrelation) is the top feature importance at *both* 168 and 42 bars.
+That consistency is itself informative — it says the momentum/trend
+artifact isn't a window-length quirk, it's a property of this generator
+architecture (most likely the transposed-conv upsampling's tendency to
+produce locally smooth, correlated outputs) that shows up regardless of
+scale. Fixing it should help both window lengths, but 42-bar's smaller gap
+means it needs less fixing to reach the floor.
+
+### Verdict
+
+**42-bar (true 7-day) windows are the better base to build on — continue on
+this branch.** Gap-to-floor is roughly half of 168-bar's, training is
+faster (11.5 vs 19.6 min) with no thermal throttling observed, and the
+diagnosis is unchanged (attack `acf_ret_1` / return autocorrelation next).
+Recommend making `windows-42bar` the primary line of work going forward
+rather than 168-bar; the 168-bar result stays on `main` if useful for
+reference (e.g. testing whether a longer-horizon generator has different
+failure modes once the autocorrelation fix lands).
