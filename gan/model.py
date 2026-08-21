@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-WINDOW_LEN = 168  # 7 days of 4h bars
+WINDOW_LEN = 168  # 168 4h-bars = 28 days (NOT 7 days -- see README "window length note")
 N_CHANNELS = 4  # (r, gap, h_off, l_off) -- see module docstring
 
 
