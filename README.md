@@ -88,3 +88,125 @@ tightest bracket around 0.5 — making it the best scale to build and validate
 the generator against. 30-day windows would need a longer history (or
 overlapping/bootstrapped windows) before their AUC estimate is trustworthy
 enough to use as a target.
+
+## Module 2: WGAN-GP generator (`gan/`)
+
+Target: a generator for 7-day (168-bar) BTC OHLC windows whose synthetic
+windows score ~0.5 AUC against real ones on the reality-floor test above.
+This is **Step 1 only** — build the skeleton and prove the training loop
+runs stably and produces structurally valid OHLC. Not tuned for realism yet
+(no reality-floor AUC run against it here — that's Step 2).
+
+### How to run
+
+**Locally (Mac, MPS)**:
+
+```
+pip install -r requirements.txt
+python3 gan/train.py
+```
+
+Device is auto-selected in order MPS → CUDA → CPU, printed at the start of
+the run. On a fanless M1 (e.g. MacBook Air), sustained long runs may
+thermally throttle and slow down mid-run — that's expected, not a bug.
+
+**Later, on Colab (GPU)**: upload or `git clone` this repo and run the exact
+same `python gan/train.py` — no code changes needed. The device-selection
+code will pick up CUDA automatically since MPS won't be available there.
+
+All hyperparameters (`Z_DIM`, batch size, learning rate, `N_CRITIC`,
+`LAMBDA_GP`, window stride, step count, ...) live in a config block at the
+top of `gan/train.py`.
+
+### OHLC parametrization (structural validity by construction)
+
+The generator never outputs 4 independent prices. Per bar it outputs, in log
+space relative to the previous bar's close:
+
+- `r` — close-to-close log return (unconstrained)
+- `gap` — open's log gap from the previous close (unconstrained)
+- `h_off` — high-wick offset above the bar body, passed through `softplus`
+  so it's **always ≥ 0**
+- `l_off` — low-wick offset below the bar body, also `softplus`'d to
+  **always ≥ 0**
+
+OHLC is then reconstructed deterministically: cumulative-sum `r` for the
+close path, add `gap` to the previous close for opens, then push high above
+`max(open,close)` and low below `min(open,close)` by the non-negative
+offsets. Because `h_off, l_off ≥ 0` is guaranteed by `softplus` for *any*
+network weights, `high ≥ max(open,close)`, `low ≤ min(open,close)`, and
+`high ≥ low` hold structurally — not something the GAN has to learn. See
+`gan/data.py` (transform + inverse transform) and `gan/model.py`
+(`Generator.forward`).
+
+Real data is losslessly re-expressed the same way for training (so the
+critic sees the same 4-channel representation for real and fake): `r`/`gap`
+are z-scored, `h_off`/`l_off` are scale-only normalized (divided by their
+mean magnitude, no centering) so real data's non-negativity is preserved
+too. Training windows are overlapping (stride 8 bars, i.e. 1-day steps)
+for data augmentation — unlike the reality-floor module, which needs
+non-overlapping windows for statistical independence, the GAN just needs
+many varied examples to train on.
+
+### Architecture
+
+- **Generator**: `z ~ N(0,I)`, dim 128 → linear → reshape → 3×
+  `ConvTranspose1d` upsampling blocks (21 → 42 → 84 → 168, BatchNorm + ReLU)
+  → 1×1-ish conv head → 4 raw channels → `softplus` on the two offset
+  channels. ~393K params.
+- **Critic**: `[4, 168]` → 3× `Conv1d` downsampling blocks (168 → 84 → 42 →
+  21, GroupNorm + LeakyReLU — **no BatchNorm**, since WGAN-GP's gradient
+  penalty is per-sample and BatchNorm couples samples in a batch, which
+  breaks it) → flatten → linear → scalar (no sigmoid). ~45K params.
+- **WGAN-GP loss**: gradient penalty on random real/fake interpolates,
+  `n_critic=5` critic updates per generator step, Adam(β=(0.0, 0.9)),
+  lr 1e-4, λ_gp=10, batch size 32.
+
+### Step-1 results
+
+Ran `gan/train.py` unmodified (300 generator steps × 5 critic steps = 1,500
+critic updates, batch size 32, seed 42):
+
+```
+Using device: mps
+Loaded 18970 bars -> 18969 feature bars -> 2351 training windows (window=168 bars = 7d, stride=8 bars)
+Real-data round-trip check (reconstruct_ohlc vs. actual prices): max relative error = 1.45e-15
+Generator params: 392,580  Critic params: 44,833
+step    1  critic_loss= +1.7533  W_dist= +0.3261  gen_loss= +0.6288  gp=0.2079
+step   20  critic_loss= -7.5647  W_dist= +9.2927  gen_loss= +9.0827  gp=0.1728
+step  100  critic_loss=-13.3628  W_dist=+18.7493  gen_loss=+32.1792  gp=0.5387
+step  200  critic_loss=-11.7413  W_dist=+14.0106  gen_loss=+44.0872  gp=0.2269
+step  300  critic_loss=-12.4748  W_dist=+14.2416  gen_loss=+52.1502  gp=0.1767
+
+Training (300 generator steps x 5 critic steps) took 16.8s on mps (56.0 ms/gen-step)
+All logged losses finite (no NaN/Inf): True
+
+Structural validity on 512 generated windows:
+  high >= max(open, close): True
+  low  <= min(open, close): True
+  high >= low             : True
+  all OHLC values finite  : True
+```
+
+Full log: `results/gan/step1_loss_log.json`. Validity check:
+`results/gan/step1_validity_check.json`. Sample generated close-price paths
+(anchor = 1.0): `results/gan/step1_sample_paths.png` — plausibly-shaped
+random walks, no blow-up, no flat lines, not realistic yet (expected — no
+realism tuning has happened).
+
+**Reading the loss trace**: everything stays finite throughout, and the
+gradient penalty stays small and bounded (~0.05–0.5, i.e. the critic's
+gradient norm stays close to the target of 1) — the Lipschitz constraint is
+being enforced correctly, no explosion. The Wasserstein distance estimate
+grows rather than shrinks over this short run; that's expected, not a bug:
+with `n_critic=5` the critic quickly gets good at separating real windows
+from an as-yet-undertrained generator's output, and 300 generator steps is
+far too short to expect convergence — Step 1 only needs to show the loop is
+numerically stable, which it is.
+
+**Timing**: 16.8s of training for 300 generator steps on an M1 (MPS) — about
+56ms/step. At that rate, even a much longer realism-tuning run (e.g. 20,000
+generator steps) would be roughly 20 minutes locally, so **local M1 training
+looks practical**; Colab likely isn't necessary unless Step 2 needs
+substantially more capacity or a much longer run runs into thermal
+throttling on the fanless Air.

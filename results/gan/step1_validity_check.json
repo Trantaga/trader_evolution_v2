@@ -1,0 +1,9 @@
+{
+  "n_checked": 512,
+  "high_ge_body": true,
+  "low_le_body": true,
+  "high_ge_low": true,
+  "all_finite": true,
+  "close_min": 0.4639243185520172,
+  "close_max": 1.6445585489273071
+}
